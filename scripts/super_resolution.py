@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.fft
 
 import matplotlib.pyplot as plt
 from utilities3 import *
@@ -16,13 +17,10 @@ import scipy.io
 torch.manual_seed(0)
 np.random.seed(0)
 
-def compl_mul3d(a, b):
+def compl_mul3d(inputs, weights):
     # (batch, in_channel, x,y,t ), (in_channel, out_channel, x,y,t) -> (batch, out_channel, x,y,t)
-    op = partial(torch.einsum, "bixyz,ioxyz->boxyz")
-    return torch.stack([
-        op(a[..., 0], b[..., 0]) - op(a[..., 1], b[..., 1]),
-        op(a[..., 1], b[..., 0]) + op(a[..., 0], b[..., 1])
-    ], dim=-1)
+    complex_weights = torch.view_as_complex(weights)
+    return torch.einsum("bixyz,ioxyz->boxyz", inputs, complex_weights)
 
 class SpectralConv3d_fast(nn.Module):
     def __init__(self, in_channels, out_channels, modes1, modes2, modes3):
@@ -34,18 +32,18 @@ class SpectralConv3d_fast(nn.Module):
         self.modes3 = modes3
 
         self.scale = (1 / (in_channels * out_channels))
-        self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2))
-        self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2))
-        self.weights3 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2))
-        self.weights4 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2))
+        self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, dtype=torch.cfloat))
+        self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, dtype=torch.cfloat))
+        self.weights3 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, dtype=torch.cfloat))
+        self.weights4 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, dtype=torch.cfloat))
 
     def forward(self, x):
         batchsize = x.shape[0]
         #Compute Fourier coeffcients up to factor of e^(- something constant)
-        x_ft = torch.rfft(x, 3, normalized=True, onesided=True)
+        x_ft = torch.fft.rfftn(x, dim=[-3,-2,-1], norm="ortho")
 
         # Multiply relevant Fourier modes
-        out_ft = torch.zeros(batchsize, self.in_channels, x.size(-3), x.size(-2), x.size(-1)//2 + 1, 2, device=x.device)
+        out_ft = torch.zeros(batchsize, self.in_channels, x.size(-3), x.size(-2), x.size(-1)//2 + 1, dtype=torch.cfloat, device=x.device)
         out_ft[:, :, :self.modes1, :self.modes2, :self.modes3] = \
             compl_mul3d(x_ft[:, :, :self.modes1, :self.modes2, :self.modes3], self.weights1)
         out_ft[:, :, -self.modes1:, :self.modes2, :self.modes3] = \
@@ -56,7 +54,7 @@ class SpectralConv3d_fast(nn.Module):
             compl_mul3d(x_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3], self.weights4)
 
         #Return to physical space
-        x = torch.irfft(out_ft, 3, normalized=True, onesided=True, signal_sizes=(x.size(-3), x.size(-2), x.size(-1)))
+        x = torch.fft.irfftn(out_ft, s=(x.size(-3), x.size(-2), x.size(-1)), norm="ortho")
         return x
 
 class SimpleBlock2d(nn.Module):
@@ -172,10 +170,10 @@ test_a = torch.cat((gridx.repeat([ntest,1,1,1,1]), gridy.repeat([ntest,1,1,1,1])
 
 t2 = default_timer()
 print('preprocessing finished, time used:', t2-t1)
-device = torch.device('cuda')
+device = torch.device('cpu')
 
 # load model
-model = torch.load('model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32')
+model = torch.load('model/ns_fourier_V1e-4_T20_N9800_ep200_m12_w32', map_location=torch.device('cpu'))
 
 print(model.count_params())
 
@@ -187,8 +185,6 @@ index = 0
 with torch.no_grad():
     test_l2 = 0
     for x, y in test_loader:
-        x, y = x.cuda(), y.cuda()
-
         out = model(x)
         pred[index] = out
         loss = myloss(out.view(1, -1), y.view(1, -1)).item()
