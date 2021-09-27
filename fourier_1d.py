@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
+import torch.fft
 import matplotlib.pyplot as plt
 
 import operator
@@ -30,7 +31,7 @@ class SpectralConv1d(nn.Module):
         super(SpectralConv1d, self).__init__()
 
         """
-        1D Fourier layer. It does FFT, linear transform, and Inverse FFT.    
+        1D Fourier layer. It does FFT, linear transform, and Inverse FFT.
         """
 
         self.in_channels = in_channels
@@ -41,9 +42,9 @@ class SpectralConv1d(nn.Module):
         self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, dtype=torch.cfloat))
 
     # Complex multiplication
-    def compl_mul1d(self, input, weights):
+    def compl_mul1d(self, inputs, weights):
         # (batch, in_channel, x ), (in_channel, out_channel, x) -> (batch, out_channel, x)
-        return torch.einsum("bix,iox->box", input, weights)
+        return torch.einsum("bix,iox->box", inputs, weights)
 
     def forward(self, x):
         batchsize = x.shape[0]
@@ -68,7 +69,7 @@ class FNO1d(nn.Module):
         2. 4 layers of the integral operators u' = (W + K)(u).
             W defined by self.w; K defined by self.conv .
         3. Project from the channel space to the output space by self.fc1 and self.fc2 .
-        
+
         input: the solution of the initial condition and location (a(x), x)
         input shape: (batchsize, x=s, c=2)
         output: the solution of a later timestep
@@ -173,7 +174,7 @@ train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_trai
 test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False)
 
 # model
-model = FNO1d(modes, width).cuda()
+model = FNO1d(modes, width)
 print(count_params(model))
 
 ################################################################
@@ -189,8 +190,6 @@ for ep in range(epochs):
     train_mse = 0
     train_l2 = 0
     for x, y in train_loader:
-        x, y = x.cuda(), y.cuda()
-
         optimizer.zero_grad()
         out = model(x)
 
@@ -207,8 +206,6 @@ for ep in range(epochs):
     test_l2 = 0.0
     with torch.no_grad():
         for x, y in test_loader:
-            x, y = x.cuda(), y.cuda()
-
             out = model(x)
             test_l2 += myloss(out.view(batch_size, -1), y.view(batch_size, -1)).item()
 
@@ -226,8 +223,6 @@ test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test,
 with torch.no_grad():
     for x, y in test_loader:
         test_l2 = 0
-        x, y = x.cuda(), y.cuda()
-
         out = model(x).view(-1)
         pred[index] = out
 
