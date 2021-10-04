@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
+from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 
 import operator
@@ -20,6 +21,7 @@ from Adam import Adam
 
 torch.manual_seed(0)
 np.random.seed(0)
+plt.switch_backend('agg')
 
 
 ################################################################
@@ -30,7 +32,7 @@ class SpectralConv1d(nn.Module):
         super(SpectralConv1d, self).__init__()
 
         """
-        1D Fourier layer. It does FFT, linear transform, and Inverse FFT.    
+        1D Fourier layer. It does FFT, linear transform, and Inverse FFT.
         """
 
         self.in_channels = in_channels
@@ -68,7 +70,7 @@ class FNO1d(nn.Module):
         2. 4 layers of the integral operators u' = (W + K)(u).
             W defined by self.w; K defined by self.conv .
         3. Project from the channel space to the output space by self.fc1 and self.fc2 .
-        
+
         input: the solution of the initial condition and location (a(x), x)
         input shape: (batchsize, x=s, c=2)
         output: the solution of a later timestep
@@ -172,6 +174,9 @@ x_test = x_test.reshape(ntest,s,1)
 train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True)
 test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False)
 
+# for iterating one-by-one
+single_test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test, y_test), batch_size=1, shuffle=False)
+
 # model
 model = FNO1d(modes, width).cuda()
 print(count_params(model))
@@ -181,6 +186,10 @@ print(count_params(model))
 ################################################################
 optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+writer = SummaryWriter()
+
+print("Starting training.")
+print("Writing Tensorboard output to ./runs")
 
 myloss = LpLoss(size_average=False)
 for ep in range(epochs):
@@ -207,17 +216,60 @@ for ep in range(epochs):
     test_l2 = 0.0
     with torch.no_grad():
         for x, y in test_loader:
-            x, y = x.cuda(), y.cuda()
+            #x, y = x.cuda(), y.cuda()
 
             out = model(x)
-            test_l2 += myloss(out.view(batch_size, -1), y.view(batch_size, -1)).item()
+            example_l2 = myloss(out.view(batch_size, -1), y.view(batch_size, -1)).item()
+            test_l2 += example_l2
 
     train_mse /= len(train_loader)
     train_l2 /= ntrain
     test_l2 /= ntest
 
     t2 = default_timer()
-    print(ep, t2-t1, train_mse, train_l2, test_l2)
+
+    # log figures
+    if ep%10 == 0:
+        # plot a fixed example
+        with torch.no_grad():
+            idx = 78  # in the Burgers dataset, an example in the shock regime
+            x = x_test[idx:idx+1,:,:]
+            y = y_test[idx:idx+1,:]
+            out = model(x_test[idx:idx+1,:,:])
+            l2 = myloss(out.view(1,-1), y.view(1,-1)).item()
+        fig = plt.figure()
+        plt.plot(out.squeeze())
+        plt.plot(y.squeeze(), 'k--')
+        plt.ylim(-1.6, 1.6)
+        plt.title("Epoch {} -- example #{} L2 error: {:.3e}".format(ep, idx, l2))
+        writer.add_figure("Examples/fixed_l2", fig, global_step=ep, walltime=t2)
+
+        # plot the worst
+        worst_pred, worst_gt, worst_l2, worst_idx = None, None, 0.0, 0.0  # track worst example
+        with torch.no_grad():
+            for idx, (x, y) in enumerate(single_test_loader):
+                out = model(x)
+                l2 = myloss(out.view(1,-1), y.view(1,-1)).item()
+                if l2 > worst_l2:
+                    worst_pred = out.squeeze()
+                    worst_gt = y.squeeze()
+                    worst_l2 = l2
+                    worst_idx = idx
+        fig = plt.figure()
+        plt.plot(worst_pred)
+        plt.plot(worst_gt, 'k--')
+        plt.title("Epoch {} -- example #{} L2 error: {:.3e}".format(ep, worst_idx, worst_l2))
+        writer.add_figure("Examples/worst_l2", fig, global_step=ep, walltime=t2)
+
+    # log metrics
+    writer.add_scalar("Loss/MSE", train_mse, ep, walltime=t2)
+    writer.add_scalars("Metrics/MSE", {"train": train_mse}, ep, walltime=t2)
+    writer.add_scalars("Metrics/L2", {"train": train_l2, "val": test_l2}, ep, walltime=t2)
+
+    print("Epoch {} --- time: {:.2e},  train mse: {:.2e},  train L2: {:.2e},  test L2: {:.2e}".format(ep, t2-t1, train_mse, train_l2, test_l2))
+
+writer.flush()
+writer.close()
 
 # torch.save(model, 'model/ns_fourier_burgers')
 pred = torch.zeros(y_test.shape)
