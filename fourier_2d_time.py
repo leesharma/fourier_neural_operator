@@ -10,6 +10,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 from utilities3 import *
 
@@ -23,6 +24,7 @@ from Adam import Adam
 
 torch.manual_seed(0)
 np.random.seed(0)
+plt.switch_backend('agg')
 
 
 ################################################################
@@ -34,7 +36,7 @@ class SpectralConv2d_fast(nn.Module):
         super(SpectralConv2d_fast, self).__init__()
 
         """
-        2D Fourier layer. It does FFT, linear transform, and Inverse FFT.    
+        2D Fourier layer. It does FFT, linear transform, and Inverse FFT.
         """
 
         self.in_channels = in_channels
@@ -77,7 +79,7 @@ class FNO2d(nn.Module):
         2. 4 layers of the integral operators u' = (W + K)(u).
             W defined by self.w; K defined by self.conv .
         3. Project from the channel space to the output space by self.fc1 and self.fc2 .
-        
+
         input: the solution of the previous 10 timesteps + 2 locations (u(t-10, x, y), ..., u(t-1, x, y),  x, y)
         input shape: (batchsize, x=64, y=64, c=12)
         output: the solution of the next timestep
@@ -152,8 +154,10 @@ class FNO2d(nn.Module):
 # configs
 ################################################################
 
-TRAIN_PATH = 'data/ns_data_V100_N1000_T50_1.mat'
-TEST_PATH = 'data/ns_data_V100_N1000_T50_2.mat'
+#TRAIN_PATH = 'data/ns_data_V100_N1000_T50_1.mat'
+#TEST_PATH = 'data/ns_data_V100_N1000_T50_2.mat'
+TRAIN_PATH = 'data/ns_V1e-3_N5000_T50.mat'
+TEST_PATH = TRAIN_PATH
 
 ntrain = 1000
 ntest = 200
@@ -171,7 +175,7 @@ scheduler_gamma = 0.5
 
 print(epochs, learning_rate, scheduler_step, scheduler_gamma)
 
-path = 'ns_fourier_2d_rnn_V10000_T20_N'+str(ntrain)+'_ep' + str(epochs) + '_m' + str(modes) + '_w' + str(width)
+path = 'ns_fourier_2d_rnn_V10000_T20_N{}_ep{}_m{}_w{}'.format(ntrain, epochs, modes, width)
 path_model = 'model/'+path
 path_train_err = 'results/'+path+'train.txt'
 path_test_err = 'results/'+path+'test.txt'
@@ -182,6 +186,9 @@ S = 64
 T_in = 10
 T = 10
 step = 1
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print('device:', device)
 
 ################################################################
 # load data
@@ -211,12 +218,13 @@ test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(test_a,
 # training and evaluation
 ################################################################
 
-model = FNO2d(modes, modes, width).cuda()
+model = FNO2d(modes, modes, width).to(device)
 # model = torch.load('model/ns_fourier_V100_N1000_ep100_m8_w20')
 
 print(count_params(model))
 optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
+writer = SummaryWriter()
 
 myloss = LpLoss(size_average=False)
 for ep in range(epochs):
@@ -274,8 +282,18 @@ for ep in range(epochs):
 
     t2 = default_timer()
     scheduler.step()
+
+    # log metrics
+    writer.add_scalar("Loss/L2", train_l2_step, ep, walltime=t2)
+    writer.add_scalars("Metrics/L2/step", {"train": train_l2_step / ntrain / (T / step), "val": test_l2_step / ntest / (T / step)}, ep, walltime=t2)
+    writer.add_scalars("Metrics/L2/full", {"train": train_l2_full / ntrain, "val": test_l2_full / ntest}, ep, walltime=t2)
+
     print(ep, t2 - t1, train_l2_step / ntrain / (T / step), train_l2_full / ntrain, test_l2_step / ntest / (T / step),
           test_l2_full / ntest)
+
+writer.flush()
+writer.close()
+
 # torch.save(model, path_model)
 
 # pred = torch.zeros(test_u.shape)
@@ -284,7 +302,7 @@ for ep in range(epochs):
 # with torch.no_grad():
 #     for x, y in test_loader:
 #         test_l2 = 0;
-#         x, y = x.cuda(), y.cuda()
+#         x, y = x.to(device), y.to(device)
 #
 #         out = model(x)
 #         out = y_normalizer.decode(out)
