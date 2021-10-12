@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
+from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 
 import operator
@@ -22,6 +23,7 @@ from Adam import Adam
 
 torch.manual_seed(0)
 np.random.seed(0)
+plt.switch_backend('agg')
 
 
 ################################################################
@@ -32,7 +34,7 @@ class SpectralConv2d(nn.Module):
         super(SpectralConv2d, self).__init__()
 
         """
-        2D Fourier layer. It does FFT, linear transform, and Inverse FFT.    
+        2D Fourier layer. It does FFT, linear transform, and Inverse FFT.
         """
 
         self.in_channels = in_channels
@@ -75,10 +77,10 @@ class FNO2d(nn.Module):
         2. 4 layers of the integral operators u' = (W + K)(u).
             W defined by self.w; K defined by self.conv .
         3. Project from the channel space to the output space by self.fc1 and self.fc2 .
-        
+
         input: the solution of the coefficient function and locations (a(x, y), x, y)
         input shape: (batchsize, x=s, y=s, c=3)
-        output: the solution 
+        output: the solution
         output shape: (batchsize, x=s, y=s, c=1)
         """
 
@@ -132,7 +134,7 @@ class FNO2d(nn.Module):
         x = F.gelu(x)
         x = self.fc2(x)
         return x
-    
+
     def get_grid(self, shape, device):
         batchsize, size_x, size_y = shape[0], shape[1], shape[2]
         gridx = torch.tensor(np.linspace(0, 1, size_x), dtype=torch.float)
@@ -144,9 +146,6 @@ class FNO2d(nn.Module):
 ################################################################
 # configs
 ################################################################
-TRAIN_PATH = 'data/piececonst_r421_N1024_smooth1.mat'
-TEST_PATH = 'data/piececonst_r421_N1024_smooth2.mat'
-
 ntrain = 1000
 ntest = 100
 
@@ -160,13 +159,20 @@ gamma = 0.5
 modes = 12
 width = 32
 
-r = 5
-h = int(((421 - 1)/r) + 1)
+r = 5  #subsampling rate
+h = int(((421 - 1)/r) + 1)  #total grid size divided by the subsampling rate
 s = h
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print('device:', device)
 
 ################################################################
 # load data and data normalization
 ################################################################
+
+TRAIN_PATH = 'data/Darcy_421/piececonst_r421_N1024_smooth1.mat'
+TEST_PATH = 'data/Darcy_421/piececonst_r421_N1024_smooth2.mat'
+
 reader = MatReader(TRAIN_PATH)
 x_train = reader.read_field('coeff')[:ntrain,::r,::r][:,:s,:s]
 y_train = reader.read_field('sol')[:ntrain,::r,::r][:,:s,:s]
@@ -188,23 +194,26 @@ x_test = x_test.reshape(ntest,s,s,1)
 train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True)
 test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test, y_test), batch_size=batch_size, shuffle=False)
 
+# for iterating one-by-one
+single_test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test, y_test), batch_size=1, shuffle=False)
+
 ################################################################
 # training and evaluation
 ################################################################
-model = FNO2d(modes, modes, width).cuda()
+model = FNO2d(modes, modes, width).to(device)
 print(count_params(model))
 
 optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+writer = SummaryWriter()
 
 myloss = LpLoss(size_average=False)
-y_normalizer.cuda()
 for ep in range(epochs):
     model.train()
     t1 = default_timer()
     train_l2 = 0
     for x, y in train_loader:
-        x, y = x.cuda(), y.cuda()
+        x, y = x.to(device), y.to(device)
 
         optimizer.zero_grad()
         out = model(x).reshape(batch_size, s, s)
@@ -223,7 +232,7 @@ for ep in range(epochs):
     test_l2 = 0.0
     with torch.no_grad():
         for x, y in test_loader:
-            x, y = x.cuda(), y.cuda()
+            x, y = x.to(device), y.to(device)
 
             out = model(x).reshape(batch_size, s, s)
             out = y_normalizer.decode(out)
@@ -234,4 +243,74 @@ for ep in range(epochs):
     test_l2 /= ntest
 
     t2 = default_timer()
-    print(ep, t2-t1, train_l2, test_l2)
+
+    # log figures
+    if ep%10==0:
+        # plot a fixed example
+        with torch.no_grad():
+            idx = 4  # in the Darcy dataset, regularly the worst prediction
+            x = x_test[idx:idx+1,:,:,:]
+            y = y_test[idx:idx+1,:,:].squeeze()
+            out = model(x).reshape(1, s, s)
+            out = y_normalizer.decode(out).squeeze()
+            l2 = myloss(out, y).item()
+        fig = plt.figure()
+        plt.suptitle("Epoch {} -- example #{} L2 error: {:.3e}".format(ep, idx, l2))
+        plt.title("Error")
+        plt.imshow(out - y, cmap='bwr')
+        plt.clim(-3e-3, 3e-3)
+        plt.colorbar()
+        writer.add_figure("Examples/Fixed/Error", fig, global_step=ep, walltime=t2)
+
+        fig = plt.figure()
+        plt.suptitle("Epoch {} -- example #{} L2 error: {:.3e}".format(ep, idx, l2))
+        plt.subplot(1,2,1)
+        plt.imshow(out)
+        plt.title("Prediction")
+        plt.subplot(1,2,2)
+        plt.imshow(y)
+        plt.title("Groundtruth")
+        plt.tight_layout()
+        writer.add_figure("Examples/Fixed/Pred", fig, global_step=ep, walltime=t2)
+
+        # plot the worst
+        worst_pred, worst_gt, worst_l2, worst_idx = None, None, 0.0, 0.0  # track worst example
+        with torch.no_grad():
+            for idx, (x, y) in enumerate(single_test_loader):
+                x, y = x.to(device), y.to(device)
+
+                out = model(x).reshape(1, s, s)
+                out = y_normalizer.decode(out)
+                l2 = myloss(out.view(1,-1), y.view(1,-1)).item()
+
+                if l2 > worst_l2:
+                    worst_pred = out.squeeze()
+                    worst_gt = y.squeeze()
+                    worst_l2 = l2
+                    worst_idx = idx
+
+        fig = plt.figure()
+        plt.suptitle("Epoch {} -- example #{} L2 error: {:.3e}".format(ep, worst_idx, worst_l2))
+        plt.title("Absolute Error")
+        plt.imshow(np.abs(worst_pred - worst_gt), cmap='inferno')
+        plt.colorbar()
+        writer.add_figure("Examples/Worst/Abs_Error", fig, global_step=ep, walltime=t2)
+
+        fig = plt.figure()
+        plt.suptitle("Epoch {} -- example #{} L2 error: {:.3e}".format(ep, worst_idx, worst_l2))
+        plt.subplot(1,2,1)
+        plt.imshow(worst_pred)
+        plt.title("Prediction")
+        plt.subplot(1,2,2)
+        plt.imshow(worst_gt)
+        plt.title("Groundtruth")
+        plt.tight_layout()
+        writer.add_figure("Examples/Worst/Pred", fig, global_step=ep, walltime=t2)
+
+    # log metrics
+    writer.add_scalars("Loss/L2", {"train": train_l2, "val": test_l2}, ep, walltime=t2)
+
+    print("Epoch {} --- time: {:.2e},  train L2: {:.2e},  test L2: {:.2e}".format(ep, t2-t1, train_l2, test_l2))
+
+writer.flush()
+writer.close()
