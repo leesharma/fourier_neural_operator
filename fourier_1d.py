@@ -153,6 +153,9 @@ gamma = 0.5
 modes = 16
 width = 64
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print('device:', device)
+
 
 ################################################################
 # read data
@@ -178,7 +181,7 @@ test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test,
 single_test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test, y_test), batch_size=1, shuffle=False)
 
 # model
-model = FNO1d(modes, width).cuda()
+model = FNO1d(modes, width).to(device)
 print(count_params(model))
 
 ################################################################
@@ -198,7 +201,7 @@ for ep in range(epochs):
     train_mse = 0
     train_l2 = 0
     for x, y in train_loader:
-        x, y = x.cuda(), y.cuda()
+        x, y = x.to(device), y.to(device)
 
         optimizer.zero_grad()
         out = model(x)
@@ -216,7 +219,7 @@ for ep in range(epochs):
     test_l2 = 0.0
     with torch.no_grad():
         for x, y in test_loader:
-            #x, y = x.cuda(), y.cuda()
+            x, y = x.to(device), y.to(device)
 
             out = model(x)
             example_l2 = myloss(out.view(batch_size, -1), y.view(batch_size, -1)).item()
@@ -278,7 +281,7 @@ test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(x_test,
 with torch.no_grad():
     for x, y in test_loader:
         test_l2 = 0
-        x, y = x.cuda(), y.cuda()
+        x, y = x.to(device), y.to(device)
 
         out = model(x).view(-1)
         pred[index] = out
