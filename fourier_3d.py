@@ -10,6 +10,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 from utilities3 import *
 
@@ -23,6 +24,7 @@ from Adam import Adam
 
 torch.manual_seed(0)
 np.random.seed(0)
+plt.switch_backend('agg')
 
 
 ################################################################
@@ -34,7 +36,7 @@ class SpectralConv3d(nn.Module):
         super(SpectralConv3d, self).__init__()
 
         """
-        3D Fourier layer. It does FFT, linear transform, and Inverse FFT.    
+        3D Fourier layer. It does FFT, linear transform, and Inverse FFT.
         """
 
         self.in_channels = in_channels
@@ -84,7 +86,7 @@ class FNO3d(nn.Module):
         2. 4 layers of the integral operators u' = (W + K)(u).
             W defined by self.w; K defined by self.conv .
         3. Project from the channel space to the output space by self.fc1 and self.fc2 .
-        
+
         input: the solution of the first 10 timesteps + 3 locations (u(1, x, y), ..., u(10, x, y),  x, y, t). It's a constant function in time, except for the last index.
         input shape: (batchsize, x=64, y=64, t=40, c=13)
         output: the solution of the next 40 timesteps
@@ -162,8 +164,10 @@ class FNO3d(nn.Module):
 # configs
 ################################################################
 
-TRAIN_PATH = 'data/ns_data_V100_N1000_T50_1.mat'
-TEST_PATH = 'data/ns_data_V100_N1000_T50_2.mat'
+# TRAIN_PATH = 'data/ns_data_V100_N1000_T50_1.mat'
+# TEST_PATH = 'data/ns_data_V100_N1000_T50_2.mat'
+TRAIN_PATH = 'data/ns_V1e-3_N5000_T50.mat'
+TEST_PATH = TRAIN_PATH
 
 ntrain = 1000
 ntest = 200
@@ -181,8 +185,7 @@ scheduler_gamma = 0.5
 
 print(epochs, learning_rate, scheduler_step, scheduler_gamma)
 
-path = 'test'
-# path = 'ns_fourier_V100_N'+str(ntrain)+'_ep' + str(epochs) + '_m' + str(modes) + '_w' + str(width)
+path = 'ns_fourier_3d_rnn_V100_N{}_ep{}_m{}_w{}'.format(ntrain, epochs, modes, width)
 path_model = 'model/'+path
 path_train_err = 'results/'+path+'train.txt'
 path_test_err = 'results/'+path+'test.txt'
@@ -232,28 +235,30 @@ test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(test_a,
 t2 = default_timer()
 
 print('preprocessing finished, time used:', t2-t1)
-device = torch.device('cuda')
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print('device:', device)
 
 ################################################################
 # training and evaluation
 ################################################################
-model = FNO3d(modes, modes, modes, width).cuda()
+model = FNO3d(modes, modes, modes, width).to(device)
 # model = torch.load('model/ns_fourier_V100_N1000_ep100_m8_w20')
 
 print(count_params(model))
 optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=scheduler_step, gamma=scheduler_gamma)
+writer = SummaryWriter()
 
 
 myloss = LpLoss(size_average=False)
-y_normalizer.cuda()
 for ep in range(epochs):
     model.train()
     t1 = default_timer()
     train_mse = 0
     train_l2 = 0
     for x, y in train_loader:
-        x, y = x.cuda(), y.cuda()
+        x, y = x.to(device), y.to(device)
 
         optimizer.zero_grad()
         out = model(x).view(batch_size, S, S, T)
@@ -276,7 +281,7 @@ for ep in range(epochs):
     test_l2 = 0.0
     with torch.no_grad():
         for x, y in test_loader:
-            x, y = x.cuda(), y.cuda()
+            x, y = x.to(device), y.to(device)
 
             out = model(x).view(batch_size, S, S, T)
             out = y_normalizer.decode(out)
@@ -287,17 +292,27 @@ for ep in range(epochs):
     test_l2 /= ntest
 
     t2 = default_timer()
-    print(ep, t2-t1, train_mse, train_l2, test_l2)
+
+    # log metrics
+    writer.add_scalar("Loss/MSE", train_mse, ep, walltime=t2)
+    writer.add_scalars("Metrics/MSE", {"train": train_mse}, ep, walltime=t2)
+    writer.add_scalars("Metrics/L2", {"train": train_l2, "val": test_l2}, ep, walltime=t2)
+
+    print("Epoch {} --- time: {:.2e},  mse loss: {:.2e}, train L2: {:.2e},  test L2: {:.2e}".format(ep, t2-t1, train_mse, train_l2, test_l2))
+
+writer.flush()
+writer.close()
 # torch.save(model, path_model)
 
 
+"""
 pred = torch.zeros(test_u.shape)
 index = 0
 test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(test_a, test_u), batch_size=1, shuffle=False)
 with torch.no_grad():
     for x, y in test_loader:
         test_l2 = 0
-        x, y = x.cuda(), y.cuda()
+        x, y = x.to(device), y.to(device)
 
         out = model(x)
         out = y_normalizer.decode(out)
@@ -308,7 +323,5 @@ with torch.no_grad():
         index = index + 1
 
 scipy.io.savemat('pred/'+path+'.mat', mdict={'pred': pred.cpu().numpy()})
-
-
-
+"""
 
