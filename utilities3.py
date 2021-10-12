@@ -107,6 +107,11 @@ class UnitGaussianNormalizer(object):
         self.mean = self.mean.cpu()
         self.std = self.std.cpu()
 
+    def to(self, device):
+        self.mean = self.mean.to(device)
+        self.std = self.std.to(device)
+
+
 # normalization, Gaussian
 class GaussianNormalizer(object):
     def __init__(self, x, eps=0.00001):
@@ -131,6 +136,10 @@ class GaussianNormalizer(object):
     def cpu(self):
         self.mean = self.mean.cpu()
         self.std = self.std.cpu()
+
+    def to(self, device):
+        self.mean = self.mean.to(device)
+        self.std = self.std.to(device)
 
 
 # normalization, scaling by range

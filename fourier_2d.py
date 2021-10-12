@@ -170,8 +170,8 @@ print('device:', device)
 # load data and data normalization
 ################################################################
 
-TRAIN_PATH = 'data/Darcy_421/piececonst_r421_N1024_smooth1.mat'
-TEST_PATH = 'data/Darcy_421/piececonst_r421_N1024_smooth2.mat'
+TRAIN_PATH = 'data/piececonst_r421_N1024_smooth1.mat'
+TEST_PATH = 'data/piececonst_r421_N1024_smooth2.mat'
 
 reader = MatReader(TRAIN_PATH)
 x_train = reader.read_field('coeff')[:ntrain,::r,::r][:,:s,:s]
@@ -187,6 +187,7 @@ x_test = x_normalizer.encode(x_test)
 
 y_normalizer = UnitGaussianNormalizer(y_train)
 y_train = y_normalizer.encode(y_train)
+y_normalizer.to(device)
 
 x_train = x_train.reshape(ntrain,s,s,1)
 x_test = x_test.reshape(ntest,s,s,1)
@@ -251,9 +252,11 @@ for ep in range(epochs):
             idx = 4  # in the Darcy dataset, regularly the worst prediction
             x = x_test[idx:idx+1,:,:,:]
             y = y_test[idx:idx+1,:,:].squeeze()
+            x,y = x.to(device), y.to(device)
             out = model(x).reshape(1, s, s)
             out = y_normalizer.decode(out).squeeze()
             l2 = myloss(out, y).item()
+            out, y = out.cpu(), y.cpu() # for plots
         fig = plt.figure()
         plt.suptitle("Epoch {} -- example #{} L2 error: {:.3e}".format(ep, idx, l2))
         plt.title("Error")
@@ -288,6 +291,7 @@ for ep in range(epochs):
                     worst_gt = y.squeeze()
                     worst_l2 = l2
                     worst_idx = idx
+            worst_pred, worst_gt = worst_pred.cpu(), worst_gt.cpu() # for plots
 
         fig = plt.figure()
         plt.suptitle("Epoch {} -- example #{} L2 error: {:.3e}".format(ep, worst_idx, worst_l2))
